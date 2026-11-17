@@ -247,6 +247,14 @@ impl Library {
             "name" => character.name.clone(),
             "class" => character.class.clone(),
             "level" => character.level.map(|n| n.to_string()).unwrap_or_default(),
+            "background" => character.background.clone(),
+            "player_name" => character.player_name.clone(),
+            "race" => character.race.clone(),
+            "alignment" => character.alignment.clone(),
+            "experience_points" => character
+                .experience_points
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
             _ => ABILITIES
                 .iter()
                 .position(|ability| *ability == field)
@@ -311,6 +319,13 @@ impl Library {
                         "name" => character.name = value,
                         "class" => character.class = value,
                         "level" => character.level = value.trim().parse().ok(),
+                        "background" => character.background = value,
+                        "player_name" => character.player_name = value,
+                        "race" => character.race = value,
+                        "alignment" => character.alignment = value,
+                        "experience_points" => {
+                            character.experience_points = value.trim().parse().ok()
+                        }
                         _ => {
                             if let Some(i) = ABILITIES.iter().position(|ability| *ability == field)
                             {
@@ -596,10 +611,12 @@ impl Library {
             }))
             .child(
                 div()
+                    .id("sheet-page")
                     .w_full()
                     .max_w(px(800.))
                     .h_full()
                     .max_h(px(960.))
+                    .overflow_y_scroll()
                     .m_4()
                     .p_6()
                     .flex()
@@ -618,17 +635,88 @@ impl Library {
                         div()
                             .flex()
                             .gap_3()
-                            .child(self.sheet_cell(character_id, "name", "CHARACTER NAME", cx))
-                            .child(self.sheet_cell(character_id, "class", "CLASS", cx))
-                            .child(self.sheet_cell(character_id, "level", "LEVEL", cx)),
+                            .child(div().w(px(230.)).flex().child(self.sheet_cell(
+                                character_id,
+                                "name",
+                                "CHARACTER NAME",
+                                cx,
+                            )))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .gap_1()
+                                                    .child(div().w(px(110.)).flex().child(
+                                                        self.sheet_cell(
+                                                            character_id,
+                                                            "class",
+                                                            "CLASS",
+                                                            cx,
+                                                        ),
+                                                    ))
+                                                    .child(div().w(px(68.)).flex().child(
+                                                        self.sheet_cell(
+                                                            character_id,
+                                                            "level",
+                                                            "LEVEL",
+                                                            cx,
+                                                        ),
+                                                    )),
+                                            )
+                                            .child(self.sheet_cell(
+                                                character_id,
+                                                "background",
+                                                "BACKGROUND",
+                                                cx,
+                                            ))
+                                            .child(self.sheet_cell(
+                                                character_id,
+                                                "player_name",
+                                                "PLAYER NAME",
+                                                cx,
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .child(self.sheet_cell(
+                                                character_id,
+                                                "race",
+                                                "RACE",
+                                                cx,
+                                            ))
+                                            .child(self.sheet_cell(
+                                                character_id,
+                                                "alignment",
+                                                "ALIGNMENT",
+                                                cx,
+                                            ))
+                                            .child(self.sheet_cell(
+                                                character_id,
+                                                "experience_points",
+                                                "EXPERIENCE POINTS",
+                                                cx,
+                                            )),
+                                    ),
+                            ),
                     )
                     .child(
                         div()
                             .flex()
                             .gap_3()
                             .flex_1()
-                            .min_h_0()
-                            .child(div().flex().flex_col().gap_2().w(px(180.)).children(
+                            .child(div().flex().flex_col().gap_1().w(px(180.)).children(
                                 ABILITIES.iter().enumerate().map(|(i, field)| {
                                     let score = self
                                         .characters
@@ -641,10 +729,10 @@ impl Library {
                                     div()
                                         .id(*field)
                                         .flex_1()
-                                        .min_h_0()
+                                        .min_h(px(68.))
                                         .border_1()
                                         .border_color(rgb(theme.edge))
-                                        .p_2()
+                                        .p_1()
                                         .flex()
                                         .flex_col()
                                         .justify_center()
@@ -686,7 +774,7 @@ impl Library {
                                         .when(
                                             score.is_some() || self.editing != Some(*field),
                                             |cell| {
-                                                cell.child(div().text_size(px(26.)).child(modifier))
+                                                cell.child(div().text_size(px(22.)).child(modifier))
                                             },
                                         )
                                         .child(if self.editing == Some(*field) {
