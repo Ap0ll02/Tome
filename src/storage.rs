@@ -21,6 +21,15 @@ pub struct Character {
     pub race: String,
     pub alignment: String,
     pub experience_points: Option<i64>,
+    pub armor_class: Option<i64>,
+    pub initiative_override: Option<i64>,
+    pub speed: String,
+    pub hit_point_maximum: Option<i64>,
+    pub current_hit_points: Option<i64>,
+    pub temporary_hit_points: Option<i64>,
+    pub hit_dice: String,
+    pub death_successes: i64,
+    pub death_failures: i64,
     pub abilities: [Option<i64>; 6],
 }
 
@@ -40,7 +49,7 @@ impl Storage {
         let connection = Connection::open(path)?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 4 {
+        if version > 5 {
             return Err(format!("Database schema version {version} is newer than this app").into());
         }
         if version == 0 {
@@ -97,6 +106,22 @@ impl Storage {
                  COMMIT;",
             )?;
         }
+        if version < 5 {
+            connection.execute_batch(
+                "BEGIN;
+                 ALTER TABLE characters ADD COLUMN armor_class INTEGER;
+                 ALTER TABLE characters ADD COLUMN initiative_override INTEGER;
+                 ALTER TABLE characters ADD COLUMN speed TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE characters ADD COLUMN hit_point_maximum INTEGER;
+                 ALTER TABLE characters ADD COLUMN current_hit_points INTEGER;
+                 ALTER TABLE characters ADD COLUMN temporary_hit_points INTEGER;
+                 ALTER TABLE characters ADD COLUMN hit_dice TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE characters ADD COLUMN death_successes INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE characters ADD COLUMN death_failures INTEGER NOT NULL DEFAULT 0;
+                 PRAGMA user_version = 5;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { connection })
     }
 
@@ -126,7 +151,10 @@ impl Storage {
         let mut query = self.connection.prepare(
             "SELECT id, name, position, class, level, strength, dexterity,
                     constitution, intelligence, wisdom, charisma, background,
-                    player_name, race, alignment, experience_points FROM characters
+                    player_name, race, alignment, experience_points, armor_class,
+                    initiative_override, speed, hit_point_maximum, current_hit_points,
+                    temporary_hit_points, hit_dice, death_successes, death_failures
+             FROM characters
              WHERE campaign_id = ?1 ORDER BY position, id",
         )?;
         let rows = query.query_map([campaign_id], |row| {
@@ -141,6 +169,15 @@ impl Storage {
                 race: row.get(13)?,
                 alignment: row.get(14)?,
                 experience_points: row.get(15)?,
+                armor_class: row.get(16)?,
+                initiative_override: row.get(17)?,
+                speed: row.get(18)?,
+                hit_point_maximum: row.get(19)?,
+                current_hit_points: row.get(20)?,
+                temporary_hit_points: row.get(21)?,
+                hit_dice: row.get(22)?,
+                death_successes: row.get(23)?,
+                death_failures: row.get(24)?,
                 abilities: [
                     row.get(5)?,
                     row.get(6)?,
@@ -178,21 +215,57 @@ impl Storage {
             race: String::new(),
             alignment: String::new(),
             experience_points: None,
+            armor_class: None,
+            initiative_override: None,
+            speed: String::new(),
+            hit_point_maximum: None,
+            current_hit_points: None,
+            temporary_hit_points: None,
+            hit_dice: String::new(),
+            death_successes: 0,
+            death_failures: 0,
             abilities: [None; 6],
         })
     }
 
     pub fn save_field(&self, character_id: i64, field: &str, value: &str) -> StorageResult<()> {
         let column = match field {
-            "name" | "class" | "level" | "background" | "player_name" | "race" | "alignment"
-            | "experience_points" | "strength" | "dexterity" | "constitution" | "intelligence"
-            | "wisdom" | "charisma" => field,
+            "name"
+            | "class"
+            | "level"
+            | "background"
+            | "player_name"
+            | "race"
+            | "alignment"
+            | "experience_points"
+            | "strength"
+            | "dexterity"
+            | "constitution"
+            | "intelligence"
+            | "wisdom"
+            | "charisma"
+            | "armor_class"
+            | "initiative_override"
+            | "speed"
+            | "hit_point_maximum"
+            | "current_hit_points"
+            | "temporary_hit_points"
+            | "hit_dice"
+            | "death_successes"
+            | "death_failures" => field,
             _ => return Err("Unknown character field".into()),
         };
         let sql = format!("UPDATE characters SET {column} = ?1 WHERE id = ?2");
         if matches!(
             column,
-            "name" | "class" | "background" | "player_name" | "race" | "alignment"
+            "name"
+                | "class"
+                | "background"
+                | "player_name"
+                | "race"
+                | "alignment"
+                | "speed"
+                | "hit_dice"
         ) {
             self.connection
                 .execute(&sql, params![value, character_id])?;
@@ -202,11 +275,24 @@ impl Storage {
             } else {
                 Some(value.trim().parse::<i64>()?)
             };
-            if column == "experience_points" {
-                if number.is_some_and(|n| n < 0) {
-                    return Err("Experience points cannot be negative".into());
+            if matches!(column, "death_successes" | "death_failures") {
+                if number.is_none_or(|n| !(0..=3).contains(&n)) {
+                    return Err("Death saves must be from 0 to 3".into());
                 }
-            } else if number.is_some_and(|n| !(1..=30).contains(&n)) {
+            } else if matches!(
+                column,
+                "experience_points"
+                    | "armor_class"
+                    | "hit_point_maximum"
+                    | "current_hit_points"
+                    | "temporary_hit_points"
+            ) {
+                if number.is_some_and(|n| n < 0) {
+                    return Err("Enter a nonnegative number".into());
+                }
+            } else if column != "initiative_override"
+                && number.is_some_and(|n| !(1..=30).contains(&n))
+            {
                 return Err("Enter a number from 1 to 30".into());
             }
             self.connection

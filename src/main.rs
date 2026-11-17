@@ -255,6 +255,29 @@ impl Library {
                 .experience_points
                 .map(|n| n.to_string())
                 .unwrap_or_default(),
+            "armor_class" => character
+                .armor_class
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            "initiative_override" => character
+                .initiative_override
+                .or_else(|| character.abilities[1].map(|dex| (dex - 10).div_euclid(2)))
+                .map(|n| format!("{n:+}"))
+                .unwrap_or_default(),
+            "speed" => character.speed.clone(),
+            "hit_point_maximum" => character
+                .hit_point_maximum
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            "current_hit_points" => character
+                .current_hit_points
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            "temporary_hit_points" => character
+                .temporary_hit_points
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            "hit_dice" => character.hit_dice.clone(),
             _ => ABILITIES
                 .iter()
                 .position(|ability| *ability == field)
@@ -277,7 +300,16 @@ impl Library {
         let Screen::Sheet { character_id, .. } = self.screen else {
             return;
         };
-        let value = self.sheet_value(character_id, field);
+        let value = if field == "initiative_override" {
+            self.characters
+                .iter()
+                .find(|character| character.id == character_id)
+                .and_then(|character| character.initiative_override)
+                .map(|n| format!("{n:+}"))
+                .unwrap_or_default()
+        } else {
+            self.sheet_value(character_id, field)
+        };
         let input = cx.new(|cx| {
             let input = TextField::with_value(cx, value, field);
             if ABILITIES.contains(&field) {
@@ -326,6 +358,21 @@ impl Library {
                         "experience_points" => {
                             character.experience_points = value.trim().parse().ok()
                         }
+                        "armor_class" => character.armor_class = value.trim().parse().ok(),
+                        "initiative_override" => {
+                            character.initiative_override = value.trim().parse().ok()
+                        }
+                        "speed" => character.speed = value,
+                        "hit_point_maximum" => {
+                            character.hit_point_maximum = value.trim().parse().ok()
+                        }
+                        "current_hit_points" => {
+                            character.current_hit_points = value.trim().parse().ok()
+                        }
+                        "temporary_hit_points" => {
+                            character.temporary_hit_points = value.trim().parse().ok()
+                        }
+                        "hit_dice" => character.hit_dice = value,
                         _ => {
                             if let Some(i) = ABILITIES.iter().position(|ability| *ability == field)
                             {
@@ -390,6 +437,60 @@ impl Library {
             Err(error) => self.save_error = Some(format!("Could not save {field}: {error}")),
         }
         cx.notify();
+    }
+
+    fn death_save_row(
+        &self,
+        character_id: i64,
+        field: &'static str,
+        label: &'static str,
+        count: i64,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(DARK.muted))
+                    .child(label),
+            )
+            .child(div().flex().gap_1().children((1..=3).map(move |mark| {
+                div()
+                    .id((field, mark as usize))
+                    .cursor_pointer()
+                    .text_size(px(20.))
+                    .text_color(rgb(DARK.accent))
+                    .child(if mark <= count { "●" } else { "○" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        let next = if count >= mark { mark - 1 } else { mark };
+                        match this
+                            .storage
+                            .save_field(character_id, field, &next.to_string())
+                        {
+                            Ok(()) => {
+                                if let Some(character) =
+                                    this.characters.iter_mut().find(|c| c.id == character_id)
+                                {
+                                    if field == "death_successes" {
+                                        character.death_successes = next;
+                                    } else {
+                                        character.death_failures = next;
+                                    }
+                                }
+                                this.save_error = None;
+                            }
+                            Err(error) => {
+                                this.save_error =
+                                    Some(format!("Could not save death saves: {error}"))
+                            }
+                        }
+                        cx.notify();
+                    }))
+            })))
     }
 
     fn sheet_cell(
@@ -594,6 +695,12 @@ impl Library {
 
     fn sheet_view(&self, character_id: i64, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &DARK;
+        let (successes, failures) = self
+            .characters
+            .iter()
+            .find(|character| character.id == character_id)
+            .map(|character| (character.death_successes, character.death_failures))
+            .unwrap_or_default();
         div()
             .id("sheet-background")
             .size_full()
@@ -800,7 +907,97 @@ impl Library {
                                         }))
                                 }),
                             ))
-                            .child(div().flex_1().border_1().border_color(rgb(theme.edge))),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .child(self.sheet_cell(
+                                                character_id,
+                                                "armor_class",
+                                                "ARMOR CLASS",
+                                                cx,
+                                            ))
+                                            .child(self.sheet_cell(
+                                                character_id,
+                                                "initiative_override",
+                                                "INITIATIVE",
+                                                cx,
+                                            ))
+                                            .child(self.sheet_cell(
+                                                character_id,
+                                                "speed",
+                                                "SPEED",
+                                                cx,
+                                            )),
+                                    )
+                                    .child(self.sheet_cell(
+                                        character_id,
+                                        "hit_point_maximum",
+                                        "HIT POINT MAXIMUM",
+                                        cx,
+                                    ))
+                                    .child(self.sheet_cell(
+                                        character_id,
+                                        "current_hit_points",
+                                        "CURRENT HIT POINTS",
+                                        cx,
+                                    ))
+                                    .child(self.sheet_cell(
+                                        character_id,
+                                        "temporary_hit_points",
+                                        "TEMPORARY HIT POINTS",
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .child(self.sheet_cell(
+                                                character_id,
+                                                "hit_dice",
+                                                "HIT DICE",
+                                                cx,
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .p_3()
+                                                    .border_1()
+                                                    .border_color(rgb(theme.edge))
+                                                    .flex()
+                                                    .flex_col()
+                                                    .justify_center()
+                                                    .gap_2()
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(11.))
+                                                            .text_color(rgb(theme.muted))
+                                                            .child("DEATH SAVES"),
+                                                    )
+                                                    .child(self.death_save_row(
+                                                        character_id,
+                                                        "death_successes",
+                                                        "SUCCESSES",
+                                                        successes,
+                                                        cx,
+                                                    ))
+                                                    .child(self.death_save_row(
+                                                        character_id,
+                                                        "death_failures",
+                                                        "FAILURES",
+                                                        failures,
+                                                        cx,
+                                                    )),
+                                            ),
+                                    ),
+                            ),
                     )
                     .when_some(self.save_error.as_ref(), |page, error| {
                         page.child(div().text_color(rgb(0xe8a090)).child(error.clone()))
