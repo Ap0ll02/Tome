@@ -342,6 +342,12 @@ impl Library {
             "proficiency_bonus_override" => Self::proficiency_bonus(character)
                 .map(|n| format!("{n:+}"))
                 .unwrap_or_default(),
+            "passive_perception_override" => character
+                .passive_perception_override
+                .or_else(|| Self::skill_bonus(character, 11).map(|bonus| 10 + bonus))
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            "other_proficiencies" => character.other_proficiencies.clone(),
             field if SAVE_FIELDS.contains(&field) => {
                 let index = SAVE_FIELDS.iter().position(|save| *save == field).unwrap();
                 Self::saving_throw_bonus(character, index)
@@ -380,6 +386,7 @@ impl Library {
         let override_value = match field {
             "initiative_override" => character.and_then(|c| c.initiative_override),
             "proficiency_bonus_override" => character.and_then(|c| c.proficiency_bonus_override),
+            "passive_perception_override" => character.and_then(|c| c.passive_perception_override),
             field if SAVE_FIELDS.contains(&field) => character.and_then(|c| {
                 let index = SAVE_FIELDS.iter().position(|save| *save == field)?;
                 c.saving_throw_overrides[index]
@@ -392,6 +399,7 @@ impl Library {
         };
         let value = if field == "initiative_override"
             || field == "proficiency_bonus_override"
+            || field == "passive_perception_override"
             || SAVE_FIELDS.contains(&field)
             || SKILLS.iter().any(|skill| skill.0 == field)
         {
@@ -401,7 +409,9 @@ impl Library {
         };
         let input = cx.new(|cx| {
             let input = TextField::with_value(cx, value, field);
-            if ABILITIES.contains(&field)
+            if field == "other_proficiencies" {
+                input.multiline()
+            } else if ABILITIES.contains(&field)
                 || SAVE_FIELDS.contains(&field)
                 || SKILLS.iter().any(|skill| skill.0 == field)
             {
@@ -501,6 +511,10 @@ impl Library {
                         "proficiency_bonus_override" => {
                             character.proficiency_bonus_override = value.trim().parse().ok()
                         }
+                        "passive_perception_override" => {
+                            character.passive_perception_override = value.trim().parse().ok()
+                        }
+                        "other_proficiencies" => character.other_proficiencies = value,
                         field if SAVE_FIELDS.contains(&field) => {
                             let index = SAVE_FIELDS.iter().position(|save| *save == field).unwrap();
                             character.saving_throw_overrides[index] = value.trim().parse().ok();
@@ -1066,7 +1080,7 @@ impl Library {
                         div()
                             .flex()
                             .gap_3()
-                            .child(div().w(px(230.)).flex().child(self.sheet_cell(
+                            .child(div().w(px(230.)).h(px(84.)).flex().child(self.sheet_cell(
                                 character_id,
                                 "name",
                                 "CHARACTER NAME",
@@ -1146,91 +1160,168 @@ impl Library {
                         div()
                             .flex()
                             .gap_3()
-                            .flex_1()
-                            .child(div().flex().flex_col().gap_1().w(px(180.)).children(
-                                ABILITIES.iter().enumerate().map(|(i, field)| {
-                                    let score = self
-                                        .characters
-                                        .iter()
-                                        .find(|c| c.id == character_id)
-                                        .and_then(|c| c.abilities[i]);
-                                    let modifier = score
-                                        .map(|n| format!("{:+}", (n - 10).div_euclid(2)))
-                                        .unwrap_or_else(|| "—".to_owned());
-                                    div()
-                                        .id(*field)
-                                        .flex_1()
-                                        .min_h(px(68.))
-                                        .border_1()
-                                        .border_color(rgb(theme.edge))
-                                        .p_1()
-                                        .flex()
-                                        .flex_col()
-                                        .justify_center()
-                                        .items_center()
-                                        .cursor_pointer()
-                                        .child(
+                            .flex_none()
+                            .items_start()
+                            .child(
+                                div()
+                                    .w(px(180.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(div().flex().flex_col().gap_1().children(
+                                        ABILITIES.iter().enumerate().map(|(i, field)| {
+                                            let score = self
+                                                .characters
+                                                .iter()
+                                                .find(|c| c.id == character_id)
+                                                .and_then(|c| c.abilities[i]);
+                                            let modifier = score
+                                                .map(|n| format!("{:+}", (n - 10).div_euclid(2)))
+                                                .unwrap_or_else(|| "—".to_owned());
                                             div()
-                                                .text_size(px(10.))
-                                                .text_color(rgb(theme.muted))
-                                                .child(field.to_uppercase()),
-                                        )
-                                        .when(
-                                            score.is_none()
-                                                && self.editing == Some(*field)
-                                                && self.sheet_field.as_ref().is_some_and(|input| {
-                                                    input.read(cx).value().trim().is_empty()
-                                                }),
-                                            |cell| {
-                                                cell.child(
-                                                    div()
-                                                        .id(("roll", i))
-                                                        .mb_1()
-                                                        .px_2()
-                                                        .border_1()
-                                                        .border_color(rgb(theme.accent))
-                                                        .text_color(rgb(theme.accent))
-                                                        .text_size(px(12.))
-                                                        .cursor_pointer()
-                                                        .child("⚄ Roll 4d6")
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                cx.stop_propagation();
-                                                                this.roll_ability(field, cx);
-                                                            },
-                                                        )),
-                                                )
-                                            },
-                                        )
-                                        .when(
-                                            score.is_some() || self.editing != Some(*field),
-                                            |cell| {
-                                                cell.child(div().text_size(px(22.)).child(modifier))
-                                            },
-                                        )
-                                        .child(if self.editing == Some(*field) {
-                                            div()
-                                                .w(px(72.))
-                                                .child(self.sheet_field.as_ref().unwrap().clone())
-                                                .into_any_element()
-                                        } else {
-                                            div()
-                                                .text_size(px(15.))
+                                                .id(*field)
+                                                .h(px(84.))
+                                                .border_1()
+                                                .border_color(rgb(theme.edge))
+                                                .p_2()
+                                                .flex()
+                                                .flex_col()
+                                                .justify_center()
+                                                .items_center()
+                                                .cursor_pointer()
                                                 .child(
-                                                    score
-                                                        .map(|n| n.to_string())
-                                                        .unwrap_or_else(|| "—".into()),
+                                                    div()
+                                                        .text_size(px(10.))
+                                                        .text_color(rgb(theme.muted))
+                                                        .child(field.to_uppercase()),
                                                 )
-                                                .into_any_element()
-                                        })
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            if this.editing != Some(*field) {
-                                                this.start_sheet_edit(field, window, cx);
-                                            }
-                                        }))
-                                }),
-                            ))
+                                                .when(
+                                                    score.is_none()
+                                                        && self.editing == Some(*field)
+                                                        && self.sheet_field.as_ref().is_some_and(
+                                                            |input| {
+                                                                input
+                                                                    .read(cx)
+                                                                    .value()
+                                                                    .trim()
+                                                                    .is_empty()
+                                                            },
+                                                        ),
+                                                    |cell| {
+                                                        cell.child(
+                                                            div()
+                                                                .id(("roll", i))
+                                                                .mb_1()
+                                                                .px_2()
+                                                                .border_1()
+                                                                .border_color(rgb(theme.accent))
+                                                                .text_color(rgb(theme.accent))
+                                                                .text_size(px(12.))
+                                                                .cursor_pointer()
+                                                                .child("⚄ Roll 4d6")
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        cx.stop_propagation();
+                                                                        this.roll_ability(
+                                                                            field, cx,
+                                                                        );
+                                                                    },
+                                                                )),
+                                                        )
+                                                    },
+                                                )
+                                                .when(
+                                                    score.is_some() || self.editing != Some(*field),
+                                                    |cell| {
+                                                        cell.child(
+                                                            div()
+                                                                .text_size(px(22.))
+                                                                .child(modifier),
+                                                        )
+                                                    },
+                                                )
+                                                .child(if self.editing == Some(*field) {
+                                                    div()
+                                                        .w(px(72.))
+                                                        .child(
+                                                            self.sheet_field
+                                                                .as_ref()
+                                                                .unwrap()
+                                                                .clone(),
+                                                        )
+                                                        .into_any_element()
+                                                } else {
+                                                    div()
+                                                        .text_size(px(15.))
+                                                        .child(
+                                                            score
+                                                                .map(|n| n.to_string())
+                                                                .unwrap_or_else(|| "—".into()),
+                                                        )
+                                                        .into_any_element()
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        if this.editing != Some(*field) {
+                                                            this.start_sheet_edit(
+                                                                field, window, cx,
+                                                            );
+                                                        }
+                                                    },
+                                                ))
+                                        }),
+                                    ))
+                                    .child(self.sheet_cell(
+                                        character_id,
+                                        "passive_perception_override",
+                                        "PASSIVE PERCEPTION",
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .id("other-proficiencies")
+                                            .min_h(px(190.))
+                                            .p_2()
+                                            .border_1()
+                                            .border_color(rgb(theme.edge))
+                                            .cursor_pointer()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .child(if self.editing == Some("other_proficiencies") {
+                                                self.sheet_field
+                                                    .as_ref()
+                                                    .unwrap()
+                                                    .clone()
+                                                    .into_any_element()
+                                            } else {
+                                                div()
+                                                    .text_size(px(13.))
+                                                    .child(self.sheet_value(
+                                                        character_id,
+                                                        "other_proficiencies",
+                                                    ))
+                                                    .into_any_element()
+                                            })
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .text_color(rgb(theme.muted))
+                                                    .child("OTHER PROFICIENCIES & LANGUAGES"),
+                                            )
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                if this.editing != Some("other_proficiencies") {
+                                                    this.start_sheet_edit(
+                                                        "other_proficiencies",
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                    ),
+                            )
                             .child(
                                 div()
                                     .w(px(205.))
@@ -1673,12 +1764,15 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("left", input::Left, Some("TextField")),
             KeyBinding::new("right", input::Right, Some("TextField")),
+            KeyBinding::new("up", input::Up, Some("TextField")),
+            KeyBinding::new("down", input::Down, Some("TextField")),
             KeyBinding::new("shift-left", input::SelectLeft, Some("TextField")),
             KeyBinding::new("shift-right", input::SelectRight, Some("TextField")),
             KeyBinding::new("backspace", input::Backspace, Some("TextField")),
             KeyBinding::new("delete", input::Delete, Some("TextField")),
             KeyBinding::new("cmd-a", input::SelectAll, Some("TextField")),
             KeyBinding::new("enter", input::Commit, Some("TextField")),
+            KeyBinding::new("cmd-enter", input::CommitNotes, Some("TextField")),
             KeyBinding::new("escape", input::Cancel, Some("TextField")),
             KeyBinding::new("escape", Back, Some("Library")),
         ]);

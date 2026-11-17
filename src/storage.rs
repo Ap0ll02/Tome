@@ -37,6 +37,8 @@ pub struct Character {
     pub saving_throw_overrides: [Option<i64>; 6],
     pub skill_proficiencies: [bool; 18],
     pub skill_overrides: [Option<i64>; 18],
+    pub passive_perception_override: Option<i64>,
+    pub other_proficiencies: String,
 }
 
 pub struct Storage {
@@ -55,7 +57,7 @@ impl Storage {
         let connection = Connection::open(path)?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 7 {
+        if version > 8 {
             return Err(format!("Database schema version {version} is newer than this app").into());
         }
         if version == 0 {
@@ -158,6 +160,15 @@ impl Storage {
                  COMMIT;",
             )?;
         }
+        if version < 8 {
+            connection.execute_batch(
+                "BEGIN;
+                 ALTER TABLE characters ADD COLUMN passive_perception_override INTEGER;
+                 ALTER TABLE characters ADD COLUMN other_proficiencies TEXT NOT NULL DEFAULT '';
+                 PRAGMA user_version = 8;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { connection })
     }
 
@@ -190,7 +201,8 @@ impl Storage {
                     player_name, race, alignment, experience_points, armor_class,
                     initiative_override, speed, hit_point_maximum, current_hit_points,
                     temporary_hit_points, hit_dice, death_successes, death_failures,
-                    inspiration, proficiency_bonus_override
+                    inspiration, proficiency_bonus_override,
+                    passive_perception_override, other_proficiencies
              FROM characters
              WHERE campaign_id = ?1 ORDER BY position, id",
         )?;
@@ -217,6 +229,8 @@ impl Storage {
                 death_failures: row.get(24)?,
                 inspiration: row.get(25)?,
                 proficiency_bonus_override: row.get(26)?,
+                passive_perception_override: row.get(27)?,
+                other_proficiencies: row.get(28)?,
                 saving_throw_proficiencies: [false; 6],
                 saving_throw_overrides: [None; 6],
                 skill_proficiencies: [false; 18],
@@ -308,6 +322,8 @@ impl Storage {
             saving_throw_overrides: [None; 6],
             skill_proficiencies: [false; 18],
             skill_overrides: [None; 18],
+            passive_perception_override: None,
+            other_proficiencies: String::new(),
         })
     }
 
@@ -336,7 +352,9 @@ impl Storage {
             | "hit_dice"
             | "death_successes"
             | "death_failures"
-            | "proficiency_bonus_override" => field,
+            | "proficiency_bonus_override"
+            | "passive_perception_override"
+            | "other_proficiencies" => field,
             _ => return Err("Unknown character field".into()),
         };
         let sql = format!("UPDATE characters SET {column} = ?1 WHERE id = ?2");
@@ -350,6 +368,7 @@ impl Storage {
                 | "alignment"
                 | "speed"
                 | "hit_dice"
+                | "other_proficiencies"
         ) {
             self.connection
                 .execute(&sql, params![value, character_id])?;
@@ -374,8 +393,12 @@ impl Storage {
                 if number.is_some_and(|n| n < 0) {
                     return Err("Enter a nonnegative number".into());
                 }
-            } else if !matches!(column, "initiative_override" | "proficiency_bonus_override")
-                && number.is_some_and(|n| !(1..=30).contains(&n))
+            } else if !matches!(
+                column,
+                "initiative_override"
+                    | "proficiency_bonus_override"
+                    | "passive_perception_override"
+            ) && number.is_some_and(|n| !(1..=30).contains(&n))
             {
                 return Err("Enter a number from 1 to 30".into());
             }
@@ -486,6 +509,12 @@ mod tests {
         reopened.save_inspiration(id, true).unwrap();
         reopened.save_saving_throw(id, 1, true, Some(7)).unwrap();
         reopened.save_skill(id, 0, true, Some(6)).unwrap();
+        reopened
+            .save_field(id, "passive_perception_override", "17")
+            .unwrap();
+        reopened
+            .save_field(id, "other_proficiencies", "Common\nDraconic")
+            .unwrap();
         assert!(reopened.save_field(id, "experience_points", "-1").is_err());
         assert!(reopened.save_field(id, "experience_points", "1.5").is_err());
         assert_eq!(
@@ -508,6 +537,8 @@ mod tests {
         assert_eq!(saved.saving_throw_overrides[1], Some(7));
         assert!(saved.skill_proficiencies[0]);
         assert_eq!(saved.skill_overrides[0], Some(6));
+        assert_eq!(saved.passive_perception_override, Some(17));
+        assert_eq!(saved.other_proficiencies, "Common\nDraconic");
         drop(reopened);
         let reopened = Storage::open(&path).unwrap();
         assert_eq!(

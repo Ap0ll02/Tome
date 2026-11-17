@@ -4,8 +4,8 @@ use gpui::{
     App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, actions, div, fill, point,
-    prelude::*, px, relative, rgb, size,
+    ShapedLine, SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine,
+    actions, div, fill, point, prelude::*, px, relative, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -32,18 +32,37 @@ fn byte_from_utf16(text: &str, offset: usize) -> usize {
     text.len()
 }
 
+fn wrapped_position(lines: &[WrappedLine], index: usize, line_height: Pixels) -> Point<Pixels> {
+    let mut start = 0;
+    let mut y = px(0.);
+    for line in lines {
+        if index <= start + line.len() {
+            let local = line
+                .position_for_index(index - start, line_height)
+                .unwrap_or_default();
+            return point(local.x, y + local.y);
+        }
+        start += line.len() + 1;
+        y += line.size(line_height).height;
+    }
+    point(px(0.), y)
+}
+
 actions!(
     field,
     [
         Left,
         Right,
+        Up,
+        Down,
         SelectLeft,
         SelectRight,
         Backspace,
         Delete,
         SelectAll,
         Commit,
-        Cancel
+        Cancel,
+        CommitNotes
     ]
 );
 
@@ -63,6 +82,9 @@ pub struct TextField {
     bounds: Option<Bounds<Pixels>>,
     selecting: bool,
     compact: bool,
+    multiline: bool,
+    wrapped_lines: Vec<WrappedLine>,
+    line_height: Pixels,
 }
 
 impl EventEmitter<FieldEvent> for TextField {}
@@ -80,6 +102,9 @@ impl TextField {
             bounds: None,
             selecting: false,
             compact: false,
+            multiline: false,
+            wrapped_lines: Vec::new(),
+            line_height: px(20.),
         }
     }
 
@@ -103,6 +128,11 @@ impl TextField {
 
     pub fn compact(mut self) -> Self {
         self.compact = true;
+        self
+    }
+
+    pub fn multiline(mut self) -> Self {
+        self.multiline = true;
         self
     }
 
@@ -168,6 +198,28 @@ impl TextField {
         };
         self.move_to(at, cx);
     }
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(-1., cx);
+    }
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(1., cx);
+    }
+    fn move_vertical(&mut self, direction: f32, cx: &mut Context<Self>) {
+        if !self.multiline {
+            return;
+        }
+        let Some(bounds) = self.bounds else {
+            return;
+        };
+        let position = wrapped_position(&self.wrapped_lines, self.cursor(), self.line_height);
+        let y = position.y + self.line_height * direction;
+        let target = if y < px(0.) {
+            0
+        } else {
+            self.at_mouse(point(bounds.left() + position.x, bounds.top() + y + px(1.)))
+        };
+        self.move_to(target, cx);
+    }
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous(), cx);
     }
@@ -191,7 +243,14 @@ impl TextField {
         self.reversed = false;
         cx.notify();
     }
-    fn commit(&mut self, _: &Commit, _: &mut Window, cx: &mut Context<Self>) {
+    fn commit(&mut self, _: &Commit, window: &mut Window, cx: &mut Context<Self>) {
+        if self.multiline {
+            self.replace_text_in_range(None, "\n", window, cx);
+        } else {
+            cx.emit(FieldEvent::Commit);
+        }
+    }
+    fn commit_notes(&mut self, _: &CommitNotes, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(FieldEvent::Commit);
     }
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
@@ -199,6 +258,27 @@ impl TextField {
     }
 
     fn at_mouse(&self, position: Point<Pixels>) -> usize {
+        if self.multiline {
+            if let Some(bounds) = self.bounds {
+                let mut y = position.y - bounds.top();
+                let mut offset = 0;
+                for line in &self.wrapped_lines {
+                    let height = line.size(self.line_height).height;
+                    if y < height {
+                        let local = line
+                            .closest_index_for_position(
+                                point(position.x - bounds.left(), y),
+                                self.line_height,
+                            )
+                            .unwrap_or_else(|index| index);
+                        return offset + local;
+                    }
+                    y -= height;
+                    offset += line.len() + 1;
+                }
+                return self.text.len();
+            }
+        }
         match (&self.bounds, &self.line) {
             (Some(bounds), Some(line)) => line.closest_index_for_x(position.x - bounds.left()),
             _ => 0,
@@ -278,7 +358,11 @@ impl EntityInputHandler for TextField {
                 .or(self.marked.take())
                 .unwrap_or(self.selection.clone()),
         );
-        let text = text.replace(['\n', '\r'], " ");
+        let text = if self.multiline {
+            text.replace('\r', "\n")
+        } else {
+            text.replace(['\n', '\r'], " ")
+        };
         self.text = format!(
             "{}{}{}",
             &self.text[..range.start],
@@ -306,7 +390,11 @@ impl EntityInputHandler for TextField {
             .unwrap_or(self.selection.start)
             .min(self.text.len());
         self.replace_text_in_range(range, text, window, cx);
-        let inserted = text.replace(['\n', '\r'], " ");
+        let inserted = if self.multiline {
+            text.replace('\r', "\n")
+        } else {
+            text.replace(['\n', '\r'], " ")
+        };
         self.marked = (!inserted.is_empty()).then_some(start..start + inserted.len());
         if let Some(selected) = selected {
             let at = start + byte_from_utf16(&inserted, selected.start);
@@ -322,6 +410,14 @@ impl EntityInputHandler for TextField {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if self.multiline {
+            let at = self.from_range(range).start;
+            let position = wrapped_position(&self.wrapped_lines, at, self.line_height);
+            return Some(Bounds::new(
+                point(bounds.left() + position.x, bounds.top() + position.y),
+                size(px(2.), self.line_height),
+            ));
+        }
         let line = self.line.as_ref()?;
         let range = self.from_range(range);
         Some(Bounds::from_corners(
@@ -344,8 +440,10 @@ struct TextElement {
 }
 struct Prepaint {
     line: Option<ShapedLine>,
+    wrapped_lines: Vec<WrappedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    multiline_selection: Vec<PaintQuad>,
 }
 
 impl IntoElement for TextElement {
@@ -372,7 +470,34 @@ impl Element for TextElement {
     ) -> (LayoutId, ()) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
+        let input = self.input.read(cx);
+        if input.multiline {
+            let text = input.text.clone();
+            let font = window.text_style().font();
+            let run = TextRun {
+                len: text.len(),
+                font,
+                color: rgb(0xe9e2d5).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let width = input
+                .bounds
+                .map(|bounds| bounds.size.width)
+                .unwrap_or(px(180.));
+            let lines = window
+                .text_system()
+                .shape_text(text, px(15.), &[run], Some(width), None)
+                .unwrap();
+            let rows: usize = lines
+                .iter()
+                .map(|line| line.wrap_boundaries().len() + 1)
+                .sum();
+            style.size.height = (window.line_height() * rows.max(8) as f32).into();
+        } else {
+            style.size.height = window.line_height().into();
+        }
         (window.request_layout(style, [], cx), ())
     }
     fn prepaint(
@@ -404,6 +529,53 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
+        if input.multiline {
+            let lines = window
+                .text_system()
+                .shape_text(
+                    display,
+                    style.font_size.to_pixels(window.rem_size()),
+                    &[run],
+                    Some(bounds.size.width),
+                    None,
+                )
+                .unwrap();
+            let position = wrapped_position(&lines, input.cursor(), window.line_height());
+            let cursor = input.selection.is_empty().then(|| {
+                fill(
+                    Bounds::new(
+                        point(bounds.left() + position.x, bounds.top() + position.y),
+                        size(px(2.), window.line_height()),
+                    ),
+                    rgb(0xc7a778),
+                )
+            });
+            let mut multiline_selection = Vec::new();
+            if !input.selection.is_empty() {
+                let start = wrapped_position(&lines, input.selection.start, window.line_height());
+                let end = wrapped_position(&lines, input.selection.end, window.line_height());
+                let mut y = start.y;
+                while y <= end.y {
+                    let left = if y == start.y { start.x } else { px(0.) };
+                    let right = if y == end.y { end.x } else { bounds.size.width };
+                    multiline_selection.push(fill(
+                        Bounds::new(
+                            point(bounds.left() + left, bounds.top() + y),
+                            size(right - left, window.line_height()),
+                        ),
+                        gpui::rgba(0xc7a77855),
+                    ));
+                    y += window.line_height();
+                }
+            }
+            return Prepaint {
+                line: None,
+                wrapped_lines: lines.into_vec(),
+                cursor,
+                selection: None,
+                multiline_selection,
+            };
+        }
         let line = window.text_system().shape_line(
             display,
             style.font_size.to_pixels(window.rem_size()),
@@ -439,8 +611,10 @@ impl Element for TextElement {
         });
         Prepaint {
             line: Some(line),
+            wrapped_lines: Vec::new(),
             cursor,
             selection,
+            multiline_selection: Vec::new(),
         }
     }
     fn paint(
@@ -462,16 +636,36 @@ impl Element for TextElement {
         if let Some(selection) = pre.selection.take() {
             window.paint_quad(selection);
         }
-        let line = pre.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .unwrap();
+        for selection in pre.multiline_selection.drain(..) {
+            window.paint_quad(selection);
+        }
+        if let Some(line) = pre.line.take() {
+            line.paint(bounds.origin, window.line_height(), window, cx)
+                .unwrap();
+            self.input.update(cx, |input, _| input.line = Some(line));
+        } else {
+            let mut y = bounds.top();
+            for line in &pre.wrapped_lines {
+                line.paint(
+                    point(bounds.left(), y),
+                    window.line_height(),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+                .unwrap();
+                y += line.size(window.line_height()).height;
+            }
+        }
         if focus.is_focused(window)
             && let Some(cursor) = pre.cursor.take()
         {
             window.paint_quad(cursor);
         }
         self.input.update(cx, |input, _| {
-            input.line = Some(line);
+            input.wrapped_lines = std::mem::take(&mut pre.wrapped_lines);
+            input.line_height = window.line_height();
             input.bounds = Some(bounds);
         });
     }
@@ -485,23 +679,33 @@ impl Render for TextField {
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::commit))
+            .on_action(cx.listener(Self::commit_notes))
             .on_action(cx.listener(Self::cancel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .w_full()
-            .h(px(if self.compact { 26. } else { 38. }))
+            .when(!self.multiline, |field| {
+                field.h(px(if self.compact { 26. } else { 38. }))
+            })
+            .when(self.multiline, |field| field.min_h(px(176.)))
             .px_2()
             .py(px(if self.compact { 2. } else { 8. }))
             .bg(rgb(0x141414))
-            .text_size(px(if self.compact { 15. } else { 18. }))
+            .text_size(px(if self.multiline || self.compact {
+                15.
+            } else {
+                18.
+            }))
             .child(TextElement { input: cx.entity() })
     }
 }
