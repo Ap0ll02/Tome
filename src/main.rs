@@ -42,6 +42,26 @@ const SAVE_FIELDS: [&str; 6] = [
     "save_wisdom",
     "save_charisma",
 ];
+const SKILLS: [(&str, &str, usize); 18] = [
+    ("skill_acrobatics", "Acrobatics (Dex)", 1),
+    ("skill_animal_handling", "Animal Handling (Wis)", 4),
+    ("skill_arcana", "Arcana (Int)", 3),
+    ("skill_athletics", "Athletics (Str)", 0),
+    ("skill_deception", "Deception (Cha)", 5),
+    ("skill_history", "History (Int)", 3),
+    ("skill_insight", "Insight (Wis)", 4),
+    ("skill_intimidation", "Intimidation (Cha)", 5),
+    ("skill_investigation", "Investigation (Int)", 3),
+    ("skill_medicine", "Medicine (Wis)", 4),
+    ("skill_nature", "Nature (Int)", 3),
+    ("skill_perception", "Perception (Wis)", 4),
+    ("skill_performance", "Performance (Cha)", 5),
+    ("skill_persuasion", "Persuasion (Cha)", 5),
+    ("skill_religion", "Religion (Int)", 3),
+    ("skill_sleight_of_hand", "Sleight of Hand (Dex)", 1),
+    ("skill_stealth", "Stealth (Dex)", 1),
+    ("skill_survival", "Survival (Wis)", 4),
+];
 
 struct Theme {
     background: u32,
@@ -92,6 +112,20 @@ impl Library {
             character.abilities[index].map(|score| {
                 (score - 10).div_euclid(2)
                     + if character.saving_throw_proficiencies[index] {
+                        Self::proficiency_bonus(character).unwrap_or(0)
+                    } else {
+                        0
+                    }
+            })
+        })
+    }
+
+    fn skill_bonus(character: &Character, index: usize) -> Option<i64> {
+        character.skill_overrides[index].or_else(|| {
+            let ability = SKILLS[index].2;
+            character.abilities[ability].map(|score| {
+                (score - 10).div_euclid(2)
+                    + if character.skill_proficiencies[index] {
                         Self::proficiency_bonus(character).unwrap_or(0)
                     } else {
                         0
@@ -314,6 +348,12 @@ impl Library {
                     .map(|n| format!("{n:+}"))
                     .unwrap_or_default()
             }
+            field if SKILLS.iter().any(|skill| skill.0 == field) => {
+                let index = SKILLS.iter().position(|skill| skill.0 == field).unwrap();
+                Self::skill_bonus(character, index)
+                    .map(|n| format!("{n:+}"))
+                    .unwrap_or_default()
+            }
             _ => ABILITIES
                 .iter()
                 .position(|ability| *ability == field)
@@ -344,11 +384,16 @@ impl Library {
                 let index = SAVE_FIELDS.iter().position(|save| *save == field)?;
                 c.saving_throw_overrides[index]
             }),
+            field if SKILLS.iter().any(|skill| skill.0 == field) => {
+                let index = SKILLS.iter().position(|skill| skill.0 == field).unwrap();
+                character.and_then(|c| c.skill_overrides[index])
+            }
             _ => None,
         };
         let value = if field == "initiative_override"
             || field == "proficiency_bonus_override"
             || SAVE_FIELDS.contains(&field)
+            || SKILLS.iter().any(|skill| skill.0 == field)
         {
             override_value.map(|n| format!("{n:+}")).unwrap_or_default()
         } else {
@@ -356,7 +401,10 @@ impl Library {
         };
         let input = cx.new(|cx| {
             let input = TextField::with_value(cx, value, field);
-            if ABILITIES.contains(&field) || SAVE_FIELDS.contains(&field) {
+            if ABILITIES.contains(&field)
+                || SAVE_FIELDS.contains(&field)
+                || SKILLS.iter().any(|skill| skill.0 == field)
+            {
                 input.compact()
             } else {
                 input
@@ -403,6 +451,21 @@ impl Library {
                 self.storage
                     .save_saving_throw(character_id, index, proficient, bonus)
             })
+        } else if let Some(index) = SKILLS.iter().position(|skill| skill.0 == field) {
+            let override_bonus = if value.trim().is_empty() {
+                Ok(None)
+            } else {
+                value.trim().parse::<i64>().map(Some).map_err(Into::into)
+            };
+            override_bonus.and_then(|bonus| {
+                let proficient = self
+                    .characters
+                    .iter()
+                    .find(|c| c.id == character_id)
+                    .is_some_and(|c| c.skill_proficiencies[index]);
+                self.storage
+                    .save_skill(character_id, index, proficient, bonus)
+            })
         } else {
             self.storage.save_field(character_id, field, &value)
         };
@@ -441,6 +504,10 @@ impl Library {
                         field if SAVE_FIELDS.contains(&field) => {
                             let index = SAVE_FIELDS.iter().position(|save| *save == field).unwrap();
                             character.saving_throw_overrides[index] = value.trim().parse().ok();
+                        }
+                        field if SKILLS.iter().any(|skill| skill.0 == field) => {
+                            let index = SKILLS.iter().position(|skill| skill.0 == field).unwrap();
+                            character.skill_overrides[index] = value.trim().parse().ok();
                         }
                         _ => {
                             if let Some(i) = ABILITIES.iter().position(|ability| *ability == field)
@@ -603,6 +670,90 @@ impl Library {
             Err(error) => self.save_error = Some(format!("Could not save saving throw: {error}")),
         }
         cx.notify();
+    }
+
+    fn toggle_skill(&mut self, character_id: i64, index: usize, cx: &mut Context<Self>) {
+        self.save_sheet_edit(cx);
+        if self.editing.is_some() {
+            return;
+        }
+        let Some(character) = self.characters.iter_mut().find(|c| c.id == character_id) else {
+            return;
+        };
+        let proficient = !character.skill_proficiencies[index];
+        match self.storage.save_skill(
+            character_id,
+            index,
+            proficient,
+            character.skill_overrides[index],
+        ) {
+            Ok(()) => {
+                character.skill_proficiencies[index] = proficient;
+                self.save_error = None;
+            }
+            Err(error) => self.save_error = Some(format!("Could not save skill: {error}")),
+        }
+        cx.notify();
+    }
+
+    fn skill_row(
+        &self,
+        character_id: i64,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (field, label, _) = SKILLS[index];
+        let proficient = self
+            .characters
+            .iter()
+            .find(|c| c.id == character_id)
+            .is_some_and(|c| c.skill_proficiencies[index]);
+        let value = self.sheet_value(character_id, field);
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .id(("skill-proficiency", index))
+                    .cursor_pointer()
+                    .text_size(px(18.))
+                    .text_color(rgb(DARK.accent))
+                    .child(if proficient { "●" } else { "○" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_skill(character_id, index, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .id(("skill-value", index))
+                    .w(px(52.))
+                    .cursor_pointer()
+                    .child(if self.editing == Some(field) {
+                        self.sheet_field
+                            .as_ref()
+                            .unwrap()
+                            .clone()
+                            .into_any_element()
+                    } else {
+                        div()
+                            .text_size(px(13.))
+                            .child(if value.is_empty() {
+                                "—".into()
+                            } else {
+                                value
+                            })
+                            .into_any_element()
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        if this.editing != Some(field) {
+                            this.start_sheet_edit(field, window, cx);
+                        }
+                    })),
+            )
+            .child(div().text_size(px(10.)).child(label))
     }
 
     fn saving_throw_row(
@@ -1082,7 +1233,7 @@ impl Library {
                             ))
                             .child(
                                 div()
-                                    .w(px(185.))
+                                    .w(px(205.))
                                     .flex()
                                     .flex_col()
                                     .gap_2()
@@ -1151,6 +1302,30 @@ impl Library {
                                                     .text_size(px(11.))
                                                     .text_color(rgb(theme.muted))
                                                     .child("SAVING THROWS"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .p_2()
+                                            .border_1()
+                                            .border_color(rgb(theme.edge))
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .children(
+                                                (0..SKILLS.len())
+                                                    .map(|index| {
+                                                        self.skill_row(character_id, index, cx)
+                                                            .into_any_element()
+                                                    })
+                                                    .collect::<Vec<_>>(),
+                                            )
+                                            .child(
+                                                div()
+                                                    .mt_1()
+                                                    .text_size(px(11.))
+                                                    .text_color(rgb(theme.muted))
+                                                    .child("SKILLS"),
                                             ),
                                     ),
                             )

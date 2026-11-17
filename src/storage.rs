@@ -35,6 +35,8 @@ pub struct Character {
     pub proficiency_bonus_override: Option<i64>,
     pub saving_throw_proficiencies: [bool; 6],
     pub saving_throw_overrides: [Option<i64>; 6],
+    pub skill_proficiencies: [bool; 18],
+    pub skill_overrides: [Option<i64>; 18],
 }
 
 pub struct Storage {
@@ -53,7 +55,7 @@ impl Storage {
         let connection = Connection::open(path)?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 6 {
+        if version > 7 {
             return Err(format!("Database schema version {version} is newer than this app").into());
         }
         if version == 0 {
@@ -142,6 +144,20 @@ impl Storage {
                  COMMIT;",
             )?;
         }
+        if version < 7 {
+            connection.execute_batch(
+                "BEGIN;
+                 CREATE TABLE skills (
+                     character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+                     skill_index INTEGER NOT NULL CHECK (skill_index BETWEEN 0 AND 17),
+                     proficient INTEGER NOT NULL DEFAULT 0,
+                     bonus_override INTEGER,
+                     PRIMARY KEY (character_id, skill_index)
+                 );
+                 PRAGMA user_version = 7;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { connection })
     }
 
@@ -203,6 +219,8 @@ impl Storage {
                 proficiency_bonus_override: row.get(26)?,
                 saving_throw_proficiencies: [false; 6],
                 saving_throw_overrides: [None; 6],
+                skill_proficiencies: [false; 18],
+                skill_overrides: [None; 18],
                 abilities: [
                     row.get(5)?,
                     row.get(6)?,
@@ -218,6 +236,9 @@ impl Storage {
             "SELECT ability_index, proficient, bonus_override FROM saving_throws
              WHERE character_id = ?1",
         )?;
+        let mut skills = self.connection.prepare(
+            "SELECT skill_index, proficient, bonus_override FROM skills WHERE character_id = ?1",
+        )?;
         for character in &mut characters {
             let rows = saves.query_map([character.id], |row| {
                 Ok((
@@ -230,6 +251,18 @@ impl Storage {
                 let (index, proficient, override_bonus) = row?;
                 character.saving_throw_proficiencies[index] = proficient;
                 character.saving_throw_overrides[index] = override_bonus;
+            }
+            let rows = skills.query_map([character.id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as usize,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (index, proficient, override_bonus) = row?;
+                character.skill_proficiencies[index] = proficient;
+                character.skill_overrides[index] = override_bonus;
             }
         }
         Ok(characters)
@@ -273,6 +306,8 @@ impl Storage {
             proficiency_bonus_override: None,
             saving_throw_proficiencies: [false; 6],
             saving_throw_overrides: [None; 6],
+            skill_proficiencies: [false; 18],
+            skill_overrides: [None; 18],
         })
     }
 
@@ -382,6 +417,26 @@ impl Storage {
         )?;
         Ok(())
     }
+
+    pub fn save_skill(
+        &self,
+        character_id: i64,
+        skill_index: usize,
+        proficient: bool,
+        bonus_override: Option<i64>,
+    ) -> StorageResult<()> {
+        if skill_index >= 18 {
+            return Err("Unknown skill".into());
+        }
+        self.connection.execute(
+            "INSERT INTO skills (character_id, skill_index, proficient, bonus_override)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(character_id, skill_index) DO UPDATE SET
+                 proficient = excluded.proficient, bonus_override = excluded.bonus_override",
+            params![character_id, skill_index as i64, proficient, bonus_override],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -430,6 +485,7 @@ mod tests {
             .unwrap();
         reopened.save_inspiration(id, true).unwrap();
         reopened.save_saving_throw(id, 1, true, Some(7)).unwrap();
+        reopened.save_skill(id, 0, true, Some(6)).unwrap();
         assert!(reopened.save_field(id, "experience_points", "-1").is_err());
         assert!(reopened.save_field(id, "experience_points", "1.5").is_err());
         assert_eq!(
@@ -450,6 +506,8 @@ mod tests {
         assert!(saved.inspiration);
         assert!(saved.saving_throw_proficiencies[1]);
         assert_eq!(saved.saving_throw_overrides[1], Some(7));
+        assert!(saved.skill_proficiencies[0]);
+        assert_eq!(saved.skill_overrides[0], Some(6));
         drop(reopened);
         let reopened = Storage::open(&path).unwrap();
         assert_eq!(
@@ -458,6 +516,13 @@ mod tests {
                 .unwrap()[0]
                 .saving_throw_overrides[1],
             Some(7)
+        );
+        assert_eq!(
+            reopened
+                .characters(reopened.campaigns().unwrap()[0].id)
+                .unwrap()[0]
+                .skill_overrides[0],
+            Some(6)
         );
         drop(reopened);
         std::fs::remove_file(path).unwrap();
