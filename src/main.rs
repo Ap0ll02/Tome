@@ -8,6 +8,7 @@ use gpui::{
     WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 use input::{FieldEvent, TextField};
+use rand::Rng;
 use storage::{Campaign, Character, Storage};
 
 actions!(library, [Back]);
@@ -269,7 +270,14 @@ impl Library {
             return;
         };
         let value = self.sheet_value(character_id, field);
-        let input = cx.new(|cx| TextField::with_value(cx, value, field));
+        let input = cx.new(|cx| {
+            let input = TextField::with_value(cx, value, field);
+            if ABILITIES.contains(&field) {
+                input.compact()
+            } else {
+                input
+            }
+        });
         cx.subscribe(&input, |this, _, event, cx| match event {
             FieldEvent::Commit => {
                 this.save_sheet_edit(cx);
@@ -324,6 +332,48 @@ impl Library {
         self.editing = None;
         self.sheet_field = None;
         window.focus(&self.focus);
+        cx.notify();
+    }
+
+    fn roll_ability(&mut self, field: &'static str, cx: &mut Context<Self>) {
+        let Screen::Sheet { character_id, .. } = self.screen else {
+            return;
+        };
+        if self.editing != Some(field)
+            || !self.sheet_value(character_id, field).is_empty()
+            || self
+                .sheet_field
+                .as_ref()
+                .is_none_or(|input| !input.read(cx).value().trim().is_empty())
+        {
+            return;
+        }
+
+        let mut dice = [0_i64; 4];
+        let mut rng = rand::rng();
+        for die in &mut dice {
+            *die = rng.random_range(1..=6);
+        }
+        let score = dice.iter().sum::<i64>() - dice.iter().min().unwrap();
+        match self
+            .storage
+            .save_field(character_id, field, &score.to_string())
+        {
+            Ok(()) => {
+                if let Some(character) = self.characters.iter_mut().find(|c| c.id == character_id) {
+                    let index = ABILITIES
+                        .iter()
+                        .position(|ability| *ability == field)
+                        .unwrap();
+                    character.abilities[index] = Some(score);
+                }
+                self.editing = None;
+                self.sheet_field = None;
+                self.save_error = None;
+                self.focus_root(cx);
+            }
+            Err(error) => self.save_error = Some(format!("Could not save {field}: {error}")),
+        }
         cx.notify();
     }
 
@@ -606,12 +656,43 @@ impl Library {
                                                 .text_color(rgb(theme.muted))
                                                 .child(field.to_uppercase()),
                                         )
-                                        .child(div().text_size(px(26.)).child(modifier))
+                                        .when(
+                                            score.is_none()
+                                                && self.editing == Some(*field)
+                                                && self.sheet_field.as_ref().is_some_and(|input| {
+                                                    input.read(cx).value().trim().is_empty()
+                                                }),
+                                            |cell| {
+                                                cell.child(
+                                                    div()
+                                                        .id(("roll", i))
+                                                        .mb_1()
+                                                        .px_2()
+                                                        .border_1()
+                                                        .border_color(rgb(theme.accent))
+                                                        .text_color(rgb(theme.accent))
+                                                        .text_size(px(12.))
+                                                        .cursor_pointer()
+                                                        .child("⚄ Roll 4d6")
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                cx.stop_propagation();
+                                                                this.roll_ability(field, cx);
+                                                            },
+                                                        )),
+                                                )
+                                            },
+                                        )
+                                        .when(
+                                            score.is_some() || self.editing != Some(*field),
+                                            |cell| {
+                                                cell.child(div().text_size(px(26.)).child(modifier))
+                                            },
+                                        )
                                         .child(if self.editing == Some(*field) {
-                                            self.sheet_field
-                                                .as_ref()
-                                                .unwrap()
-                                                .clone()
+                                            div()
+                                                .w(px(72.))
+                                                .child(self.sheet_field.as_ref().unwrap().clone())
                                                 .into_any_element()
                                         } else {
                                             div()

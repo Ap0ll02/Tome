@@ -62,6 +62,7 @@ pub struct TextField {
     line: Option<ShapedLine>,
     bounds: Option<Bounds<Pixels>>,
     selecting: bool,
+    compact: bool,
 }
 
 impl EventEmitter<FieldEvent> for TextField {}
@@ -78,6 +79,7 @@ impl TextField {
             line: None,
             bounds: None,
             selecting: false,
+            compact: false,
         }
     }
 
@@ -97,6 +99,11 @@ impl TextField {
         field.text = value.into();
         field.placeholder = placeholder.into();
         field
+    }
+
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
     }
 
     pub fn focus(&self) -> &FocusHandle {
@@ -490,11 +497,11 @@ impl Render for TextField {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .w_full()
-            .h(px(38.))
+            .h(px(if self.compact { 26. } else { 38. }))
             .px_2()
-            .py_2()
+            .py(px(if self.compact { 2. } else { 8. }))
             .bg(rgb(0x141414))
-            .text_size(px(18.))
+            .text_size(px(if self.compact { 15. } else { 18. }))
             .child(TextElement { input: cx.entity() })
     }
 }
