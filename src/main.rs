@@ -34,6 +34,14 @@ const ABILITIES: [&str; 6] = [
     "wisdom",
     "charisma",
 ];
+const SAVE_FIELDS: [&str; 6] = [
+    "save_strength",
+    "save_dexterity",
+    "save_constitution",
+    "save_intelligence",
+    "save_wisdom",
+    "save_charisma",
+];
 
 struct Theme {
     background: u32,
@@ -73,6 +81,25 @@ struct Library {
 }
 
 impl Library {
+    fn proficiency_bonus(character: &Character) -> Option<i64> {
+        character
+            .proficiency_bonus_override
+            .or_else(|| character.level.map(|level| 2 + (level - 1).div_euclid(4)))
+    }
+
+    fn saving_throw_bonus(character: &Character, index: usize) -> Option<i64> {
+        character.saving_throw_overrides[index].or_else(|| {
+            character.abilities[index].map(|score| {
+                (score - 10).div_euclid(2)
+                    + if character.saving_throw_proficiencies[index] {
+                        Self::proficiency_bonus(character).unwrap_or(0)
+                    } else {
+                        0
+                    }
+            })
+        })
+    }
+
     fn subscribe_field(field: &Entity<TextField>, cx: &mut Context<Self>) {
         cx.subscribe(field, |this, _, event, cx| match event {
             FieldEvent::Commit => this.save_name(cx),
@@ -278,6 +305,15 @@ impl Library {
                 .map(|n| n.to_string())
                 .unwrap_or_default(),
             "hit_dice" => character.hit_dice.clone(),
+            "proficiency_bonus_override" => Self::proficiency_bonus(character)
+                .map(|n| format!("{n:+}"))
+                .unwrap_or_default(),
+            field if SAVE_FIELDS.contains(&field) => {
+                let index = SAVE_FIELDS.iter().position(|save| *save == field).unwrap();
+                Self::saving_throw_bonus(character, index)
+                    .map(|n| format!("{n:+}"))
+                    .unwrap_or_default()
+            }
             _ => ABILITIES
                 .iter()
                 .position(|ability| *ability == field)
@@ -300,19 +336,27 @@ impl Library {
         let Screen::Sheet { character_id, .. } = self.screen else {
             return;
         };
-        let value = if field == "initiative_override" {
-            self.characters
-                .iter()
-                .find(|character| character.id == character_id)
-                .and_then(|character| character.initiative_override)
-                .map(|n| format!("{n:+}"))
-                .unwrap_or_default()
+        let character = self.characters.iter().find(|c| c.id == character_id);
+        let override_value = match field {
+            "initiative_override" => character.and_then(|c| c.initiative_override),
+            "proficiency_bonus_override" => character.and_then(|c| c.proficiency_bonus_override),
+            field if SAVE_FIELDS.contains(&field) => character.and_then(|c| {
+                let index = SAVE_FIELDS.iter().position(|save| *save == field)?;
+                c.saving_throw_overrides[index]
+            }),
+            _ => None,
+        };
+        let value = if field == "initiative_override"
+            || field == "proficiency_bonus_override"
+            || SAVE_FIELDS.contains(&field)
+        {
+            override_value.map(|n| format!("{n:+}")).unwrap_or_default()
         } else {
             self.sheet_value(character_id, field)
         };
         let input = cx.new(|cx| {
             let input = TextField::with_value(cx, value, field);
-            if ABILITIES.contains(&field) {
+            if ABILITIES.contains(&field) || SAVE_FIELDS.contains(&field) {
                 input.compact()
             } else {
                 input
@@ -344,7 +388,25 @@ impl Library {
             return;
         };
         let value = input.read(cx).value();
-        match self.storage.save_field(character_id, field, &value) {
+        let result = if let Some(index) = SAVE_FIELDS.iter().position(|save| *save == field) {
+            let override_bonus = if value.trim().is_empty() {
+                Ok(None)
+            } else {
+                value.trim().parse::<i64>().map(Some).map_err(Into::into)
+            };
+            override_bonus.and_then(|bonus| {
+                let proficient = self
+                    .characters
+                    .iter()
+                    .find(|c| c.id == character_id)
+                    .is_some_and(|c| c.saving_throw_proficiencies[index]);
+                self.storage
+                    .save_saving_throw(character_id, index, proficient, bonus)
+            })
+        } else {
+            self.storage.save_field(character_id, field, &value)
+        };
+        match result {
             Ok(()) => {
                 if let Some(character) = self.characters.iter_mut().find(|c| c.id == character_id) {
                     match field {
@@ -373,6 +435,13 @@ impl Library {
                             character.temporary_hit_points = value.trim().parse().ok()
                         }
                         "hit_dice" => character.hit_dice = value,
+                        "proficiency_bonus_override" => {
+                            character.proficiency_bonus_override = value.trim().parse().ok()
+                        }
+                        field if SAVE_FIELDS.contains(&field) => {
+                            let index = SAVE_FIELDS.iter().position(|save| *save == field).unwrap();
+                            character.saving_throw_overrides[index] = value.trim().parse().ok();
+                        }
                         _ => {
                             if let Some(i) = ABILITIES.iter().position(|ability| *ability == field)
                             {
@@ -491,6 +560,110 @@ impl Library {
                         cx.notify();
                     }))
             })))
+    }
+
+    fn toggle_inspiration(&mut self, character_id: i64, cx: &mut Context<Self>) {
+        self.save_sheet_edit(cx);
+        if self.editing.is_some() {
+            return;
+        }
+        let Some(character) = self.characters.iter_mut().find(|c| c.id == character_id) else {
+            return;
+        };
+        let inspired = !character.inspiration;
+        match self.storage.save_inspiration(character_id, inspired) {
+            Ok(()) => {
+                character.inspiration = inspired;
+                self.save_error = None;
+            }
+            Err(error) => self.save_error = Some(format!("Could not save inspiration: {error}")),
+        }
+        cx.notify();
+    }
+
+    fn toggle_saving_throw(&mut self, character_id: i64, index: usize, cx: &mut Context<Self>) {
+        self.save_sheet_edit(cx);
+        if self.editing.is_some() {
+            return;
+        }
+        let Some(character) = self.characters.iter_mut().find(|c| c.id == character_id) else {
+            return;
+        };
+        let proficient = !character.saving_throw_proficiencies[index];
+        match self.storage.save_saving_throw(
+            character_id,
+            index,
+            proficient,
+            character.saving_throw_overrides[index],
+        ) {
+            Ok(()) => {
+                character.saving_throw_proficiencies[index] = proficient;
+                self.save_error = None;
+            }
+            Err(error) => self.save_error = Some(format!("Could not save saving throw: {error}")),
+        }
+        cx.notify();
+    }
+
+    fn saving_throw_row(
+        &self,
+        character_id: i64,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let field = SAVE_FIELDS[index];
+        let character = self.characters.iter().find(|c| c.id == character_id);
+        let proficient = character.is_some_and(|c| c.saving_throw_proficiencies[index]);
+        let value = self.sheet_value(character_id, field);
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .id(("save-proficiency", index))
+                    .cursor_pointer()
+                    .text_size(px(18.))
+                    .text_color(rgb(DARK.accent))
+                    .child(if proficient { "●" } else { "○" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_saving_throw(character_id, index, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .id(("save-value", index))
+                    .w(px(50.))
+                    .cursor_pointer()
+                    .child(if self.editing == Some(field) {
+                        self.sheet_field
+                            .as_ref()
+                            .unwrap()
+                            .clone()
+                            .into_any_element()
+                    } else {
+                        div()
+                            .text_size(px(14.))
+                            .child(if value.is_empty() {
+                                "—".into()
+                            } else {
+                                value
+                            })
+                            .into_any_element()
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        if this.editing != Some(field) {
+                            this.start_sheet_edit(field, window, cx);
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .child(ABILITIES[index].to_uppercase()),
+            )
     }
 
     fn sheet_cell(
@@ -907,6 +1080,80 @@ impl Library {
                                         }))
                                 }),
                             ))
+                            .child(
+                                div()
+                                    .w(px(185.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("inspiration")
+                                            .p_2()
+                                            .border_1()
+                                            .border_color(rgb(theme.edge))
+                                            .cursor_pointer()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_size(px(20.))
+                                                    .text_color(rgb(theme.accent))
+                                                    .child(
+                                                        if self
+                                                            .characters
+                                                            .iter()
+                                                            .find(|c| c.id == character_id)
+                                                            .is_some_and(|c| c.inspiration)
+                                                        {
+                                                            "●"
+                                                        } else {
+                                                            "○"
+                                                        },
+                                                    ),
+                                            )
+                                            .child(div().text_size(px(12.)).child("INSPIRATION"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.toggle_inspiration(character_id, cx);
+                                            })),
+                                    )
+                                    .child(div().h(px(84.)).flex().child(self.sheet_cell(
+                                        character_id,
+                                        "proficiency_bonus_override",
+                                        "PROFICIENCY BONUS",
+                                        cx,
+                                    )))
+                                    .child(
+                                        div()
+                                            .p_2()
+                                            .border_1()
+                                            .border_color(rgb(theme.edge))
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .children(
+                                                (0..6)
+                                                    .map(|index| {
+                                                        self.saving_throw_row(
+                                                            character_id,
+                                                            index,
+                                                            cx,
+                                                        )
+                                                        .into_any_element()
+                                                    })
+                                                    .collect::<Vec<_>>(),
+                                            )
+                                            .child(
+                                                div()
+                                                    .mt_1()
+                                                    .text_size(px(11.))
+                                                    .text_color(rgb(theme.muted))
+                                                    .child("SAVING THROWS"),
+                                            ),
+                                    ),
+                            )
                             .child(
                                 div()
                                     .flex_1()
